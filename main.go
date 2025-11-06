@@ -33,6 +33,7 @@ const (
 	MaxConcurrentDNSLimit   = 1000
 	MaxResolveTimeout       = 30 * time.Second
 	MinWatchInterval        = 100 * time.Millisecond
+	DNSCacheTTL             = 5 * time.Minute
 )
 
 var warnLog = log.New(os.Stderr, "WARNING: ", log.LstdFlags)
@@ -195,10 +196,66 @@ func (ft *FinTracker) Cleanup() {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
 	
-	cutoff := time.Now().Add(-24 * time.Hour)
+	cutoff := time.Now().Add(-1 * time.Hour)
 	for key, firstSeen := range ft.connections {
 		if firstSeen.Before(cutoff) {
 			delete(ft.connections, key)
+		}
+	}
+}
+
+type DNSResolver struct {
+	cache     map[string]string
+	cacheTime map[string]time.Time
+	mu        sync.RWMutex
+	ttl       time.Duration
+}
+
+func NewDNSResolver(ttl time.Duration) *DNSResolver {
+	return &DNSResolver{
+		cache:     make(map[string]string),
+		cacheTime: make(map[string]time.Time),
+		ttl:       ttl,
+	}
+}
+
+func (dr *DNSResolver) Lookup(ip string, timeout time.Duration, resolver *net.Resolver) string {
+	dr.mu.RLock()
+	cached, exists := dr.cache[ip]
+	cacheTime, timeExists := dr.cacheTime[ip]
+	dr.mu.RUnlock()
+
+	if exists && timeExists && time.Since(cacheTime) <= dr.ttl {
+		return cached
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	names, err := resolver.LookupAddr(ctx, ip)
+	if err != nil || len(names) == 0 {
+		return ""
+	}
+
+	result := strings.TrimRight(names[0], ".")
+	
+	dr.mu.Lock()
+	dr.cache[ip] = result
+	dr.cacheTime[ip] = time.Now()
+	dr.mu.Unlock()
+
+	return result
+}
+
+func (dr *DNSResolver) Cleanup() {
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
+
+	cutoff := time.Now().Add(-dr.ttl)
+	for ip, cacheTime := range dr.cacheTime {
+		if cacheTime.Before(cutoff) {
+			delete(dr.cache, ip)
+			delete(dr.cacheTime, ip)
 		}
 	}
 }
@@ -230,6 +287,7 @@ type ProcessManager struct {
 	mu         sync.RWMutex
 	cache      map[string]string
 	lastUpdate time.Time
+	updating   bool
 }
 
 func NewProcessManager() *ProcessManager {
@@ -240,7 +298,8 @@ func NewProcessManager() *ProcessManager {
 
 func (pm *ProcessManager) Get(refreshInterval time.Duration) map[string]string {
 	pm.mu.RLock()
-	if pm.cache != nil && time.Since(pm.lastUpdate) <= refreshInterval {
+	cacheValid := pm.cache != nil && time.Since(pm.lastUpdate) <= refreshInterval && !pm.updating
+	if cacheValid {
 		defer pm.mu.RUnlock()
 		return pm.cache
 	}
@@ -249,12 +308,14 @@ func (pm *ProcessManager) Get(refreshInterval time.Duration) map[string]string {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	if pm.cache != nil && time.Since(pm.lastUpdate) <= refreshInterval {
+	if pm.cache != nil && time.Since(pm.lastUpdate) <= refreshInterval && !pm.updating {
 		return pm.cache
 	}
 
+	pm.updating = true
 	pm.cache = pm.buildProcessMap()
 	pm.lastUpdate = time.Now()
+	pm.updating = false
 	return pm.cache
 }
 
@@ -343,14 +404,17 @@ func safePath(path string) bool {
 
 func parseHexIPPort(s string, isIPv6 bool) (string, int, error) {
 	parts := strings.Split(s, ":")
-	if len(parts) < 2 {
-		return "", 0, &ParseError{Field: "ip:port", Value: s, Err: errors.New("invalid format")}
-	}
-
-	if isIPv6 && len(parts) > 2 {
+	if isIPv6 {
+		if len(parts) < 2 {
+			return "", 0, &ParseError{Field: "ip:port", Value: s, Err: errors.New("invalid IPv6 format")}
+		}
 		ipHex := strings.Join(parts[:len(parts)-1], "")
 		portHex := parts[len(parts)-1]
 		parts = []string{ipHex, portHex}
+	} else {
+		if len(parts) != 2 {
+			return "", 0, &ParseError{Field: "ip:port", Value: s, Err: errors.New("invalid IPv4 format")}
+		}
 	}
 
 	ipHex, portHex := parts[0], parts[1]
@@ -573,6 +637,10 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 
+	if !safePath(cfg.TCPFile) || !safePath(cfg.TCP6File) {
+		return &ConfigError{Field: "tcp_files", Value: cfg.TCPFile, Err: errors.New("invalid TCP file path")}
+	}
+
 	return validateFilters(cfg.State, cfg.LocalIP, cfg.RemoteIP)
 }
 
@@ -680,7 +748,7 @@ func calculateStats(sockets []Socket) ConnectionStats {
 	return stats
 }
 
-func resolveHosts(sockets []Socket, timeout time.Duration, maxConcurrent int) {
+func resolveHosts(sockets []Socket, timeout time.Duration, maxConcurrent int, dnsResolver *DNSResolver) {
 	if maxConcurrent <= 0 {
 		maxConcurrent = DefaultMaxConcurrentDNS
 	}
@@ -710,12 +778,9 @@ func resolveHosts(sockets []Socket, timeout time.Duration, maxConcurrent int) {
 				return
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-
-			names, err := resolver.LookupAddr(ctx, ip)
-			if err == nil && len(names) > 0 {
-				sockets[idx].Resolved = strings.TrimRight(names[0], ".")
+			resolved := dnsResolver.Lookup(ip, timeout, resolver)
+			if resolved != "" {
+				sockets[idx].Resolved = resolved
 			}
 		}(i)
 	}
@@ -777,8 +842,11 @@ func displayConnections(sockets []Socket, format string, noColor bool, watchMode
 		return
 	}
 
-	headers := []string{"State", "Local Address", "Remote Address", "Process"}
-	widths := []int{len("State"), len("Local Address"), len("Remote Address"), len("Process")}
+	headers := make([]string, 0, 5)
+	widths := make([]int, 0, 5)
+	
+	headers = append(headers, "State", "Local Address", "Remote Address", "Process")
+	widths = append(widths, len("State"), len("Local Address"), len("Remote Address"), len("Process"))
 
 	if showDurations {
 		headers = append(headers, "Duration")
@@ -832,7 +900,8 @@ func displayConnections(sockets []Socket, format string, noColor bool, watchMode
 			process = fmt.Sprintf("%s [%s]", process, s.Resolved)
 		}
 
-		fields := []interface{}{state, localAddr, remoteAddr, process}
+		fields := make([]interface{}, 0, 5)
+		fields = append(fields, state, localAddr, remoteAddr, process)
 		if showDurations {
 			fields = append(fields, s.Duration)
 		}
@@ -993,11 +1062,14 @@ func checkFileAccessibility(files ...string) error {
 	return nil
 }
 
-func processCycle(cfg *Config, procManager *ProcessManager, finTracker *FinTracker) error {
+func processCycle(cfg *Config, procManager *ProcessManager, finTracker *FinTracker, dnsResolver *DNSResolver) error {
 	sockets, errs := readAllConnections(cfg.TCPFile, cfg.TCP6File, cfg.Verbose, cfg.MaxProcessAge, procManager)
 	if len(errs) > 0 {
 		for _, e := range errs {
 			fmt.Fprintln(os.Stderr, e)
+		}
+		if len(sockets) == 0 && len(errs) == 2 {
+			return fmt.Errorf("failed to read both TCP files")
 		}
 	}
 
@@ -1021,7 +1093,7 @@ func processCycle(cfg *Config, procManager *ProcessManager, finTracker *FinTrack
 	sortedSockets := sortSockets(filteredSockets, cfg.SortBy, finTracker)
 
 	if cfg.Resolve {
-		resolveHosts(sortedSockets, cfg.ResolveTimeout, cfg.MaxConcurrentDNS)
+		resolveHosts(sortedSockets, cfg.ResolveTimeout, cfg.MaxConcurrentDNS, dnsResolver)
 	}
 
 	if cfg.Summary {
@@ -1046,6 +1118,12 @@ func formatDuration(d time.Duration) string {
 func runApplication(ctx context.Context, cfg *Config) error {
 	procManager := NewProcessManager()
 	finTracker := NewFinTracker()
+	dnsResolver := NewDNSResolver(DNSCacheTTL)
+
+	defer func() {
+		finTracker.Cleanup()
+		dnsResolver.Cleanup()
+	}()
 
 	if cfg.WatchInterval > 0 {
 		mode := "all connections"
@@ -1064,6 +1142,7 @@ func runApplication(ctx context.Context, cfg *Config) error {
 			select {
 			case <-ticker.C:
 				finTracker.Cleanup()
+				dnsResolver.Cleanup()
 			case <-ctx.Done():
 				return
 			}
@@ -1085,7 +1164,7 @@ func runApplication(ctx context.Context, cfg *Config) error {
 				clearScreen()
 			}
 
-			if err := processCycle(cfg, procManager, finTracker); err != nil {
+			if err := processCycle(cfg, procManager, finTracker, dnsResolver); err != nil {
 				return err
 			}
 
