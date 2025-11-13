@@ -154,11 +154,11 @@ type Socket struct {
 }
 
 type ConnectionHistory struct {
-	State       string    `json:"state"`
-	Timestamp   time.Time `json:"timestamp"`
-	Duration    string    `json:"duration,omitempty"`
-	TXQueue     int       `json:"tx_queue,omitempty"`
-	RXQueue     int       `json:"rx_queue,omitempty"`
+	State     string    `json:"state"`
+	Timestamp time.Time `json:"timestamp"`
+	Duration  string    `json:"duration,omitempty"`
+	TXQueue   int       `json:"tx_queue,omitempty"`
+	RXQueue   int       `json:"rx_queue,omitempty"`
 }
 
 type FinConnection struct {
@@ -173,23 +173,23 @@ type FinConnection struct {
 }
 
 type ConnectionStats struct {
-	Total              int            `json:"total"`
-	ByState            map[string]int `json:"by_state"`
-	ByProcess          map[string]int `json:"by_process"`
-	Timestamp          time.Time      `json:"timestamp"`
-	IPv4Count          int            `json:"ipv4_count"`
-	IPv6Count          int            `json:"ipv6_count"`
-	FinConnections     int            `json:"fin_connections"`
-	EstablishedCount   int            `json:"established_count"`
-	ListeningCount     int            `json:"listening_count"`
-	StateTransitions   int            `json:"state_transitions"`
-	ActiveFinConnections int          `json:"active_fin_connections"`
+	Total                int            `json:"total"`
+	ByState              map[string]int `json:"by_state"`
+	ByProcess            map[string]int `json:"by_process"`
+	Timestamp            time.Time      `json:"timestamp"`
+	IPv4Count            int            `json:"ipv4_count"`
+	IPv6Count            int            `json:"ipv6_count"`
+	FinConnections       int            `json:"fin_connections"`
+	EstablishedCount     int            `json:"established_count"`
+	ListeningCount       int            `json:"listening_count"`
+	StateTransitions     int            `json:"state_transitions"`
+	ActiveFinConnections int            `json:"active_fin_connections"`
 }
 
 type FinTracker struct {
-	mu              sync.RWMutex
-	connections     map[string]*FinConnection
-	stateHistory    map[string][]ConnectionHistory
+	mu           sync.RWMutex
+	connections  map[string]*FinConnection
+	stateHistory map[string][]ConnectionHistory
 }
 
 func NewFinTracker() *FinTracker {
@@ -201,12 +201,12 @@ func NewFinTracker() *FinTracker {
 
 func (ft *FinTracker) Track(socket Socket, txQueue, rxQueue int) {
 	key := fmt.Sprintf("%s:%d-%s:%d", socket.LocalIP, socket.LocalPort, socket.RemoteIP, socket.RemotePort)
-	
+
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
-	
+
 	now := time.Now()
-	
+
 	if finConn, exists := ft.connections[key]; exists {
 		if finConn.Socket.State != socket.State {
 			finConn.StateHistory = append(finConn.StateHistory, ConnectionHistory{
@@ -219,15 +219,15 @@ func (ft *FinTracker) Track(socket Socket, txQueue, rxQueue int) {
 			finConn.LastState = socket.State
 			finConn.Socket.StateChanges++
 		}
-		
+
 		finConn.Socket.TXQueue = txQueue
 		finConn.Socket.RXQueue = rxQueue
 		finConn.Socket.State = socket.State
 		finConn.TotalDuration = formatDuration(now.Sub(finConn.FirstSeen))
-		
+
 		finConn.IsListening = socket.State == "LISTEN"
 		finConn.IsEstablished = socket.State == "ESTABLISHED"
-		
+
 		if finStates[socket.State] {
 			ft.determineCloseReason(finConn, socket.State)
 		}
@@ -248,7 +248,7 @@ func (ft *FinTracker) Track(socket Socket, txQueue, rxQueue int) {
 		finConn.Socket.TXQueue = txQueue
 		finConn.Socket.RXQueue = rxQueue
 		finConn.Socket.StateChanges = 1
-		
+
 		ft.connections[key] = finConn
 	}
 }
@@ -272,10 +272,10 @@ func (ft *FinTracker) determineCloseReason(finConn *FinConnection, currentState 
 
 func (ft *FinTracker) GetFinConnection(socket Socket) (*FinConnection, bool) {
 	key := fmt.Sprintf("%s:%d-%s:%d", socket.LocalIP, socket.LocalPort, socket.RemoteIP, socket.RemotePort)
-	
+
 	ft.mu.RLock()
 	defer ft.mu.RUnlock()
-	
+
 	if finConn, exists := ft.connections[key]; exists {
 		return finConn, true
 	}
@@ -284,10 +284,10 @@ func (ft *FinTracker) GetFinConnection(socket Socket) (*FinConnection, bool) {
 
 func (ft *FinTracker) GetDuration(socket Socket) (time.Duration, bool) {
 	key := fmt.Sprintf("%s:%d-%s:%d", socket.LocalIP, socket.LocalPort, socket.RemoteIP, socket.RemotePort)
-	
+
 	ft.mu.RLock()
 	defer ft.mu.RUnlock()
-	
+
 	if finConn, exists := ft.connections[key]; exists {
 		return time.Since(finConn.FirstSeen), true
 	}
@@ -297,7 +297,7 @@ func (ft *FinTracker) GetDuration(socket Socket) (time.Duration, bool) {
 func (ft *FinTracker) GetAllFinConnections() []*FinConnection {
 	ft.mu.RLock()
 	defer ft.mu.RUnlock()
-	
+
 	connections := make([]*FinConnection, 0, len(ft.connections))
 	for _, conn := range ft.connections {
 		connections = append(connections, conn)
@@ -308,7 +308,7 @@ func (ft *FinTracker) GetAllFinConnections() []*FinConnection {
 func (ft *FinTracker) GetStateHistory(key string) []ConnectionHistory {
 	ft.mu.RLock()
 	defer ft.mu.RUnlock()
-	
+
 	return ft.stateHistory[key]
 }
 
@@ -322,14 +322,14 @@ func (fc *FinConnection) LastStateChange() time.Time {
 func (ft *FinTracker) Cleanup() {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
-	
+
 	cutoff := time.Now().Add(-1 * time.Hour)
 	for key, finConn := range ft.connections {
 		if finConn.FirstSeen.Before(cutoff) && !finStates[finConn.Socket.State] {
 			delete(ft.connections, key)
 		}
 	}
-	
+
 	for key, history := range ft.stateHistory {
 		if len(history) > 0 && history[len(history)-1].Timestamp.Before(cutoff) {
 			delete(ft.stateHistory, key)
@@ -371,7 +371,7 @@ func (dr *DNSResolver) Lookup(ip string, timeout time.Duration, resolver *net.Re
 	}
 
 	result := strings.TrimRight(names[0], ".")
-	
+
 	dr.mu.Lock()
 	dr.cache[ip] = result
 	dr.cacheTime[ip] = time.Now()
@@ -394,29 +394,29 @@ func (dr *DNSResolver) Cleanup() {
 }
 
 type Config struct {
-	TCPFile          string        `json:"tcp_file"`
-	TCP6File         string        `json:"tcp6_file"`
-	WatchInterval    time.Duration `json:"watch_interval"`
-	State            string        `json:"state"`
-	LocalIP          string        `json:"local_ip"`
-	RemoteIP         string        `json:"remote_ip"`
-	Port             int           `json:"port"`
-	Process          string        `json:"process"`
-	SortBy           string        `json:"sort"`
-	Format           string        `json:"format"`
-	NoColor          bool          `json:"no_color"`
-	Verbose          bool          `json:"verbose"`
-	ShowStats        bool          `json:"show_stats"`
-	Resolve          bool          `json:"resolve"`
-	ResolveTimeout   time.Duration `json:"resolve_timeout"`
-	Summary          bool          `json:"summary"`
-	MaxProcessAge    time.Duration `json:"max_process_age"`
-	MaxConcurrentDNS int           `json:"max_concurrent_dns"`
-	WatchFin         bool          `json:"watch_fin"`
-	ShowDurations    bool          `json:"show_durations"`
-	ShowFinDetails   bool          `json:"show_fin_details"`
-	ShowQueueInfo    bool          `json:"show_queue_info"`
-	ShowStateHistory bool          `json:"show_state_history"`
+	TCPFile           string        `json:"tcp_file"`
+	TCP6File          string        `json:"tcp6_file"`
+	WatchInterval     time.Duration `json:"watch_interval"`
+	State             string        `json:"state"`
+	LocalIP           string        `json:"local_ip"`
+	RemoteIP          string        `json:"remote_ip"`
+	Port              int           `json:"port"`
+	Process           string        `json:"process"`
+	SortBy            string        `json:"sort"`
+	Format            string        `json:"format"`
+	NoColor           bool          `json:"no_color"`
+	Verbose           bool          `json:"verbose"`
+	ShowStats         bool          `json:"show_stats"`
+	Resolve           bool          `json:"resolve"`
+	ResolveTimeout    time.Duration `json:"resolve_timeout"`
+	Summary           bool          `json:"summary"`
+	MaxProcessAge     time.Duration `json:"max_process_age"`
+	MaxConcurrentDNS  int           `json:"max_concurrent_dns"`
+	WatchFin          bool          `json:"watch_fin"`
+	ShowDurations     bool          `json:"show_durations"`
+	ShowFinDetails    bool          `json:"show_fin_details"`
+	ShowQueueInfo     bool          `json:"show_queue_info"`
+	ShowStateHistory  bool          `json:"show_state_history"`
 }
 
 type ProcessManager struct {
@@ -947,7 +947,7 @@ func resolveHosts(sockets []Socket, timeout time.Duration, maxConcurrent int, dn
 }
 
 func displayFinConnectionDetails(finConn *FinConnection, noColor bool) {
-	fmt.Printf("\n🔍 FIN Connection Details:\n")
+	fmt.Printf("\nFIN Connection Details:\n")
 	fmt.Printf("   Local:  %s:%d\n", finConn.Socket.LocalIP, finConn.Socket.LocalPort)
 	fmt.Printf("   Remote: %s:%d\n", finConn.Socket.RemoteIP, finConn.Socket.RemotePort)
 	fmt.Printf("   Process: %s\n", finConn.Socket.Process)
@@ -955,14 +955,14 @@ func displayFinConnectionDetails(finConn *FinConnection, noColor bool) {
 	fmt.Printf("   First Seen: %s\n", finConn.FirstSeen.Format("2006-01-02 15:04:05"))
 	fmt.Printf("   Total Duration: %s\n", finConn.TotalDuration)
 	fmt.Printf("   State Changes: %d\n", finConn.Socket.StateChanges)
-	
+
 	if finConn.CloseReason != "" {
 		fmt.Printf("   Close Reason: %s\n", finConn.CloseReason)
 	}
-	
+
 	fmt.Printf("   Queue Info: TX=%d, RX=%d\n", finConn.Socket.TXQueue, finConn.Socket.RXQueue)
 	fmt.Printf("   Flags: Listening=%v, Established=%v\n", finConn.IsListening, finConn.IsEstablished)
-	
+
 	if len(finConn.StateHistory) > 1 {
 		fmt.Printf("\n   State History:\n")
 		for i, history := range finConn.StateHistory {
@@ -982,7 +982,7 @@ func displayFinConnectionDetails(finConn *FinConnection, noColor bool) {
 			fmt.Println()
 		}
 	}
-	fmt.Println(strings.Repeat("─", 80))
+	fmt.Println(strings.Repeat("-", 80))
 }
 
 func displayConnections(sockets []Socket, format string, noColor bool, watchMode bool, showStats bool, showDurations bool, showFinDetails bool, showQueueInfo bool, showStateHistory bool, finTracker *FinTracker) {
@@ -1022,7 +1022,7 @@ func displayConnections(sockets []Socket, format string, noColor bool, watchMode
 		} else {
 			output = sockets
 		}
-		
+
 		data, err := json.MarshalIndent(output, "", "  ")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error marshaling JSON: %v\n", err)
@@ -1034,7 +1034,7 @@ func displayConnections(sockets []Socket, format string, noColor bool, watchMode
 
 	headers := make([]string, 0, 8)
 	widths := make([]int, 0, 8)
-	
+
 	headers = append(headers, "State", "Local Address", "Remote Address", "Process")
 	widths = append(widths, len("State"), len("Local Address"), len("Remote Address"), len("Process"))
 
@@ -1042,12 +1042,12 @@ func displayConnections(sockets []Socket, format string, noColor bool, watchMode
 		headers = append(headers, "Duration")
 		widths = append(widths, len("Duration"))
 	}
-	
+
 	if showQueueInfo {
 		headers = append(headers, "TX/RX")
 		widths = append(widths, len("TX/RX"))
 	}
-	
+
 	if showStateHistory {
 		headers = append(headers, "Changes")
 		widths = append(widths, len("Changes"))
@@ -1091,7 +1091,7 @@ func displayConnections(sockets []Socket, format string, noColor bool, watchMode
 		headerFormat += fmt.Sprintf("%%-%ds ", widths[i])
 	}
 	fmt.Printf(headerFormat+"\n", headersToInterface(headers)...)
-	
+
 	totalWidth := 0
 	for _, w := range widths {
 		totalWidth += w + 1
@@ -1099,7 +1099,7 @@ func displayConnections(sockets []Socket, format string, noColor bool, watchMode
 	fmt.Println(strings.Repeat("-", totalWidth))
 
 	displayedFinConns := make(map[string]bool)
-	
+
 	for _, s := range sockets {
 		state := s.State
 		if !noColor {
@@ -1116,25 +1116,25 @@ func displayConnections(sockets []Socket, format string, noColor bool, watchMode
 
 		fields := make([]interface{}, 0, 8)
 		fields = append(fields, state, localAddr, remoteAddr, process)
-		
+
 		if showDurations {
 			fields = append(fields, s.Duration)
 		}
-		
+
 		if showQueueInfo {
 			fields = append(fields, fmt.Sprintf("%d/%d", s.TXQueue, s.RXQueue))
 		}
-		
+
 		if showStateHistory {
 			fields = append(fields, fmt.Sprintf("%d", s.StateChanges))
 		}
-		
+
 		rowFormat := ""
 		for i := range fields {
 			rowFormat += fmt.Sprintf("%%-%ds ", widths[i])
 		}
 		fmt.Printf(rowFormat+"\n", fields...)
-		
+
 		if showFinDetails && finStates[s.State] {
 			key := fmt.Sprintf("%s:%d-%s:%d", s.LocalIP, s.LocalPort, s.RemoteIP, s.RemotePort)
 			if !displayedFinConns[key] {
@@ -1158,7 +1158,7 @@ func headersToInterface(headers []string) []interface{} {
 func displaySummary(sockets []Socket, finTracker *FinTracker, noColor bool) {
 	stats := calculateStats(sockets, finTracker)
 
-	fmt.Printf("\n📊 TCP CONNECTION SUMMARY:\n")
+	fmt.Printf("\nTCP CONNECTION SUMMARY:\n")
 	fmt.Printf("   Total connections: %d\n", stats.Total)
 	fmt.Printf("   IPv4 connections: %d\n", stats.IPv4Count)
 	fmt.Printf("   IPv6 connections: %d\n", stats.IPv6Count)
@@ -1215,15 +1215,15 @@ func displaySummary(sockets []Socket, finTracker *FinTracker, noColor bool) {
 		}
 		fmt.Printf("     %-30s: %d\n", p.name, p.count)
 	}
-	
+
 	if stats.ActiveFinConnections > 0 {
 		fmt.Printf("\n   FIN Connection States:\n")
 		finConns := finTracker.GetAllFinConnections()
-		finStates := make(map[string]int)
+		finStateCounts := make(map[string]int)
 		for _, conn := range finConns {
-			finStates[conn.Socket.State]++
+			finStateCounts[conn.Socket.State]++
 		}
-		for state, count := range finStates {
+		for state, count := range finStateCounts {
 			fmt.Printf("     %-15s: %d\n", state, count)
 		}
 	}
@@ -1329,12 +1329,12 @@ func processCycle(cfg *Config, procManager *ProcessManager, finTracker *FinTrack
 
 	for i := range filteredSockets {
 		finTracker.Track(filteredSockets[i], filteredSockets[i].TXQueue, filteredSockets[i].RXQueue)
-		
+
 		if duration, exists := finTracker.GetDuration(filteredSockets[i]); exists {
 			filteredSockets[i].Duration = formatDuration(duration)
 			filteredSockets[i].FirstSeen = time.Now().Add(-duration).Format("15:04:05")
 		}
-		
+
 		if finConn, exists := finTracker.GetFinConnection(filteredSockets[i]); exists {
 			filteredSockets[i].StateChanges = finConn.Socket.StateChanges
 		}
